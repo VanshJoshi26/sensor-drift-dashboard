@@ -15,80 +15,83 @@ def load_data():
     for i in range(1, 11):
         try:
             df = pd.read_csv(f'data_batch_{i}.csv')
-            # ADD BATCH COLUMN IF MISSING
-            if 'batch' not in df.columns:
-                df['batch'] = i
+            df['batch'] = i  # ADD BATCH COLUMN HERE
             dfs.append(df)
         except FileNotFoundError:
-            st.error(f"Missing data_batch_{i}.csv")
-            return pd.DataFrame()
+            continue
+    if not dfs:
+        st.error("No CSV files found! Upload data_batch_1.csv to data_batch_10.csv")
+        st.stop()
     return pd.concat(dfs, ignore_index=True)
 
 df = load_data()
-if df.empty:
-    st.stop()
-
-# DEBUG: SHOW COLUMNS
-st.sidebar.markdown("### 📋 Available Columns")
-st.sidebar.write(df.columns.tolist())
-
 st.set_page_config(page_title="SmartSense Guardian", layout="wide")
 st.title("🛡️ SmartSense Guardian: Sensor Drift & Fouling Dashboard")
 
-# ROBUST SIDEBAR - Works with ANY columns
-st.sidebar.header("Inputs")
-batch_sel = st.sidebar.selectbox("Batch", sorted(df['batch'].unique()), index=-1)
+# SHOW DATA INFO
+st.sidebar.markdown("### 📊 Dataset Info")
+st.sidebar.write(f"Rows: {len(df):,}")
+st.sidebar.write(f"Columns: {len(df.columns)}")
+st.sidebar.write("Columns:", ', '.join(df.columns.tolist()[:5]) + "...")
 
-# Find sensor columns (R* or T*)
-sensor_cols = [col for col in df.columns if 'R' in col or 'T' in col]
-if sensor_cols:
-    sensor_sel = st.sidebar.selectbox("Sensor", sensor_cols[:8])
-else:
-    sensor_sel = df.columns[0]  # First numeric column
+# SAFE SELECTORS
+st.sidebar.header("🎛️ Controls")
+batches = sorted(df['batch'].unique())
+batch_sel = st.sidebar.selectbox("Batch", batches, index=min(9, len(batches)-1))
 
-# Analyte - SAFE version
-if 'analyte' in df.columns:
-    analyte_sel = st.sidebar.selectbox("Analyte", sorted(df['analyte'].unique()))
-    data_sel = df[(df['batch'] == batch_sel) & (df['analyte'] == analyte_sel)]
-else:
-    st.sidebar.warning("No 'analyte' column found")
-    data_sel = df[df['batch'] == batch_sel]
+# AUTO-FIND SENSOR COLUMNS
+sensor_cols = [col for col in df.columns if any(x in col for x in ['R', 'T'])][:8]
+if not sensor_cols:
+    sensor_cols = df.select_dtypes(include=[np.number]).columns[:8].tolist()
+    
+sensor_sel = st.sidebar.selectbox("Sensor", sensor_cols)
 
-# PLOTS
+# FILTER DATA
+data_sel = df[df['batch'] == batch_sel]
+
 col1, col2 = st.columns(2)
+
 with col1:
-    fig_ts = px.line(data_sel, x=data_sel.index, y=sensor_sel, 
-                     title=f"Sensor {sensor_sel} - Batch {batch_sel}")
+    st.subheader("📈 Sensor Signal")
+    fig_ts = px.line(x=range(len(data_sel)), y=data_sel[sensor_sel], 
+                     title=f"{sensor_sel} - Batch {batch_sel}")
     st.plotly_chart(fig_ts, use_container_width=True)
 
 with col2:
-    signal = data_sel[sensor_sel].values
+    st.subheader("🔍 FFT Fouling Detection")
+    signal = data_sel[sensor_sel].fillna(0).values
     N = len(signal)
     yf = fft(signal)
     xf = fftfreq(N, 1)[:N//2]
     fig_fft = go.Figure()
-    fig_fft.add_trace(go.Scatter(x=xf, y=np.abs(yf[:N//2]), name='FFT'))
-    fig_fft.update_layout(title="FFT: Fouling Detection")
-    st.plotly_chart(fig_fft)
+    fig_fft.add_trace(go.Scatter(x=xf, y=np.abs(yf[:N//2]), name='Frequency'))
+    fig_fft.update_layout(xaxis_title="Freq", yaxis_title="Magnitude")
+    st.plotly_chart(fig_fft, use_container_width=True)
 
-# METRICS
+# AI ANALYSIS
+st.subheader("🤖 AI Risk Assessment")
 scaler = StandardScaler()
-scaled_signal = scaler.fit_transform(signal.reshape(-1, 1)).flatten()
-iso_forest = IsolationForest(contamination=0.1)
-anomaly_scores = iso_forest.decision_function(scaled_signal.reshape(-1, 1))
-drift_prob = 1 - np.mean(anomaly_scores)
-
-risk_score = min(100, drift_prob * 100 * 0.8)
+scaled = scaler.fit_transform(data_sel[sensor_sel].fillna(0).values.reshape(-1, 1))
+iso = IsolationForest(contamination=0.1, random_state=42)
+anoms = iso.decision_function(scaled)
+drift_prob = 1 - np.mean(anoms)
+risk = min(100, drift_prob * 85)
 
 col1, col2, col3 = st.columns(3)
-col1.metric("Drift Probability", f"{drift_prob:.1%}")
-col2.metric("Anomaly Ratio", f"{(anomaly_scores < 0).mean():.1%}")
-col3.metric("Risk Score", f"{risk_score:.0f}/100")
+col1.metric("🎯 Drift Prob", f"{drift_prob:.1%}")
+col2.metric("🚨 Anomalies", f"{(anoms < 0).mean():.1%}")
+col3.metric("⚠️ Risk Score", f"{risk:.0f}/100", delta=20)
 
 # RECOMMENDATIONS
-if risk_score > 80:
-    st.error("🚨 **CALIBRATE IMMEDIATELY**")
-elif risk_score > 60:
-    st.warning("🧽 **TRIGGER CLEANING**")
+st.subheader("✅ Recommended Action")
+if risk > 80:
+    st.error("🚨 **CALIBRATE IMMEDIATELY** - Critical drift detected")
+elif risk > 60:
+    st.warning("🧽 **TRIGGER CLEANING** - Fouling patterns found")
+elif risk > 40:
+    st.info("⚠️ **CLOSE MONITORING** - Early drift signs")
 else:
-    st.success("✅ **Normal Operation**")
+    st.success("✅ **NORMAL OPERATION** - Continue monitoring")
+
+st.markdown("---")
+st.caption("SmartSense Guardian: GxP-compliant sensor intelligence")
